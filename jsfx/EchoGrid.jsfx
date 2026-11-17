@@ -1,0 +1,1138 @@
+desc: EchoGrid - Sequencer Delay
+//tags: delay echo tape sequencer multitap ping-pong
+//author: Claude for Ireground
+//
+// EchoGrid: conventional delay + free "handle" sequencer delay.
+// Each handle = one repeat: drag left/right for time, up/down for level.
+// FX (Filter, Phaser, Flanger) can affect Everything, Only Echoes, or sit In Loop.
+// The Shifter always sits in the feedback loop, so each repeat climbs in pitch.
+// Right-click any slider -> Assign to Macro. Set each range in the MACRO panel.
+
+options:maxmem=16000000
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+slider1:0<0,2,1{Normal,Dual Echo,Ping-Pong}>-Playback Mode
+slider2:100<0,200,0.1>-Stereo Width (%)
+slider3:50<-50,100,0.1>-Dual R Offset (%)
+slider4:0<0,1,1{Normal,Sequencer}>-Mode
+slider5:0<0,1,1{Beat Div,ms}>-Time Unit
+slider6:2<0,7,1{Digital,Analog BBD,Studio Tape,Cheap Tape,Space Echo,Dark BBD,Lo-Fi,Ambient}>-Type
+slider7:100<0,200,0.1>-Character (%)
+slider8:40<0,110,0.1>-Feedback (%)
+slider9:11<0,18,1{1/64,1/32T,1/32,1/16T,1/32D,1/16,1/8T,1/16D,1/8,1/4T,1/8D,1/4,1/2T,1/4D,1/2,1/1T,1/2D,1 Bar,2 Bars}>-Time (Beat)
+slider10:375<1,4000,0.1>-Time (ms)
+slider11:2<0,3,1{1 Beat,1/2 Bar,1 Bar,2 Bars}>-Grid Length
+slider12:2<0,5,1{1/4,1/8,1/16,1/32,1/8T,1/16T}>-Grid Snap
+slider13:1000<50,4000,0.1>-Grid Length (ms)
+slider14:0<0,2,1{Everything,Only Echoes,In Loop}>-FX Affect
+slider15:0<-60,6,0.1>-Dry (dB)
+slider16:-6<-60,6,0.1>-Wet (dB)
+slider17:0<0,100,0.1>-Macro
+slider18:0<0,1,1{Off,On}>-Freeze
+slider19:0<0,100,0.1>-Duck (%)
+slider20:0<0,1,1{Off,On}>-Filter On
+slider21:0<0,6,1{Low Pass,High Pass,Band Pass,Notch,Peak,Low Shelf,High Shelf}>-Filter Type
+slider22:2500<20,20000,1>-Filter Cutoff (Hz)
+slider23:0.71<0.3,12,0.01>-Filter Q
+slider24:0<-18,18,0.1>-Filter Gain (dB)
+slider25:0<0,1,1{Off,On}>-Phaser On
+slider26:800<100,8000,1>-Phaser Cutoff (Hz)
+slider27:0.3<0.02,10,0.01>-Phaser Rate (Hz)
+slider28:60<0,100,0.1>-Phaser Depth (%)
+slider29:4<2,12,2>-Phaser Order
+slider30:90<0,180,1>-Phaser Spread (deg)
+slider31:100<0,100,0.1>-Phaser Mix (%)
+slider32:0<0,1,1{Off,On}>-Flanger On
+slider33:2.5<0.3,15,0.01>-Flanger Delay (ms)
+slider34:70<0,100,0.1>-Flanger Depth (%)
+slider35:0.2<0.02,10,0.01>-Flanger Rate (Hz)
+slider36:90<0,180,1>-Flanger Spread (deg)
+slider37:40<-95,95,0.1>-Flanger Feedback (%)
+slider38:100<0,100,0.1>-Flanger Mix (%)
+slider39:0<0,1,1{Off,On}>-Shifter On
+slider40:0<0,1,1{Pitch,Frequency}>-Shifter Mode
+slider41:12<-24,24,0.01>-Shifter Pitch (st)
+slider42:50<-1000,1000,0.1>-Shifter Freq (Hz)
+slider43:0<0,100,0.1>-Shifter LFO Depth (%)
+slider44:0.5<0.02,10,0.01>-Shifter LFO Rate (Hz)
+slider45:0<0,180,1>-Shifter Stereo (deg)
+slider46:100<0,100,0.1>-Shifter Mix (%)
+
+@init
+ext_noinit = 1;
+gfx_ext_retina = 1;
+NS = 46;
+TWO_PI = 2*$pi;
+
+// ---------- fixed tables (low memory, survive samplerate changes) ----------
+htime = 0; hlev = 16; tsm = 32; tenv = 48; ttg = 64; tpan = 80;
+pmin = 100; pmax = 200; plog = 300; pdef = 400; punit = 500; pmac = 600;
+m_on = 700; m_lo = 800; m_hi = 900; eff = 1000;
+divtab = 1100; restab = 1130; typt = 1200; phzL = 1700; phzR = 1720;
+hpan = 1760; hton = 1780; tlpL = 1800; tlpR = 1820; tcfa = 1840;
+hilL = 1900; hilR = 1940; hca = 1980; hcb = 1990;
+MEMBASE = 4096;
+
+// ---------- parameter table ----------
+// unit: 0 %, 1 ms, 2 dB, 3 Hz, 4 plain, 5 deg, 6 int, 7 signed %
+function defp(s, mn, mx, lg, unit, mac, dflt, name)
+(
+  pmin[s] = mn; pmax[s] = mx; plog[s] = lg; punit[s] = unit; pmac[s] = mac; pdef[s] = dflt;
+  strcpy(200+s, name);
+);
+defp(2, 0, 200, 0, 0, 1, 100, "WIDTH");
+defp(3, -50, 100, 0, 7, 1, 50, "R OFFSET");
+defp(7, 0, 200, 0, 0, 1, 100, "CHARACTER");
+defp(8, 0, 110, 0, 0, 1, 40, "FEEDBACK");
+defp(10, 1, 4000, 1, 1, 1, 375, "TIME");
+defp(13, 50, 4000, 1, 1, 1, 1000, "LENGTH");
+defp(15, -60, 6, 0, 2, 1, 0, "DRY");
+defp(16, -60, 6, 0, 2, 1, -6, "WET");
+defp(17, 0, 100, 0, 0, 0, 0, "MACRO");
+defp(19, 0, 100, 0, 0, 1, 0, "DUCK");
+defp(22, 20, 20000, 1, 3, 1, 2500, "CUTOFF");
+defp(23, 0.3, 12, 1, 4, 1, 0.71, "Q");
+defp(24, -18, 18, 0, 2, 1, 0, "GAIN");
+defp(26, 100, 8000, 1, 3, 1, 800, "CUTOFF");
+defp(27, 0.02, 10, 1, 3, 1, 0.3, "RATE");
+defp(28, 0, 100, 0, 0, 1, 60, "DEPTH");
+defp(29, 2, 12, 0, 6, 0, 4, "ORDER");
+defp(30, 0, 180, 0, 5, 1, 90, "SPREAD");
+defp(31, 0, 100, 0, 0, 1, 100, "MIX");
+defp(33, 0.3, 15, 1, 1, 1, 2.5, "DELAY");
+defp(34, 0, 100, 0, 0, 1, 70, "DEPTH");
+defp(35, 0.02, 10, 1, 3, 1, 0.2, "RATE");
+defp(36, 0, 180, 0, 5, 1, 90, "SPREAD");
+defp(37, -95, 95, 0, 7, 1, 40, "FEEDBACK");
+defp(38, 0, 100, 0, 0, 1, 100, "MIX");
+defp(41, -24, 24, 0, 8, 1, 12, "PITCH");
+defp(42, -1000, 1000, 2, 9, 1, 50, "FREQUENCY");
+defp(43, 0, 100, 0, 0, 1, 0, "LFO DEPTH");
+defp(44, 0.02, 10, 1, 3, 1, 0.5, "LFO RATE");
+defp(45, 0, 180, 0, 5, 1, 0, "STEREO");
+defp(46, 0, 100, 0, 0, 1, 100, "MIX");
+
+// macro list display names (more specific than slider labels)
+strcpy(600+2, "Width"); strcpy(600+3, "R Offset"); strcpy(600+7, "Character"); strcpy(600+8, "Feedback");
+strcpy(600+10, "Time"); strcpy(600+13, "Grid Len"); strcpy(600+15, "Dry"); strcpy(600+16, "Wet");
+strcpy(600+19, "Duck"); strcpy(600+22, "Flt Cutoff"); strcpy(600+23, "Flt Q"); strcpy(600+24, "Flt Gain");
+strcpy(600+26, "Ph Cutoff"); strcpy(600+27, "Ph Rate"); strcpy(600+28, "Ph Depth"); strcpy(600+30, "Ph Spread");
+strcpy(600+31, "Ph Mix"); strcpy(600+33, "Fl Delay"); strcpy(600+34, "Fl Depth"); strcpy(600+35, "Fl Rate");
+strcpy(600+36, "Fl Spread"); strcpy(600+37, "Fl Fdbk"); strcpy(600+38, "Fl Mix");
+strcpy(600+41, "Sh Pitch"); strcpy(600+42, "Sh Freq"); strcpy(600+43, "Sh LFO Dep"); strcpy(600+44, "Sh LFO Rate");
+strcpy(600+45, "Sh Stereo"); strcpy(600+46, "Sh Mix");
+
+// ---------- delay types (Echoboy-inspired) ----------
+// A: lowpass Hz, highpass Hz, LP resonance Q, drive, noise
+function deftA(t, lp, hp, q, drv, nz) local(b) ( b = typt + t*16; b[0] = lp; b[1] = hp; b[2] = q; b[3] = drv; b[8] = nz; );
+// B: wow ms, wow Hz, flutter ms, flutter Hz, stereo mod phase
+function deftB(t, wms, whz, fms, fhz, sp) local(b) ( b = typt + t*16; b[4] = wms; b[5] = whz; b[6] = fms; b[7] = fhz; b[9] = sp; );
+// C: bit depth, sample rate, diffusion on/off
+function deftC(t, bits, srr, dif) local(b) ( b = typt + t*16; b[10] = bits; b[11] = srr; b[12] = dif; );
+
+deftA(0, 18000, 10, 0.707, 0, 0);        deftB(0, 0, 0, 0, 0, 0);          deftC(0, 0, 0, 0);
+deftA(1, 3800, 60, 0.85, 1.6, 0.0005);   deftB(1, 0.25, 0.5, 0.03, 4, 1.57); deftC(1, 0, 0, 0);
+deftA(2, 9000, 35, 0.6, 1.4, 0.00015);   deftB(2, 0.3, 0.45, 0.05, 6.5, 0); deftC(2, 0, 0, 0);
+deftA(3, 4200, 140, 0.7, 2.4, 0.0012);   deftB(3, 1.1, 0.7, 0.12, 8, 0.3);  deftC(3, 0, 0, 0);
+deftA(4, 4800, 180, 1.3, 2.0, 0.0007);   deftB(4, 0.6, 0.55, 0.08, 5, 0.2); deftC(4, 0, 0, 0);
+deftA(5, 2300, 80, 0.9, 1.8, 0.0008);    deftB(5, 0.5, 0.9, 0, 0, 1.57);    deftC(5, 0, 0, 0);
+deftA(6, 7500, 100, 0.7, 1.2, 0);        deftB(6, 0, 0, 0, 0, 0);          deftC(6, 10, 12000, 0);
+deftA(7, 7000, 120, 0.6, 1.0, 0.0001);   deftB(7, 0.25, 0.3, 0, 0, 0.8);   deftC(7, 0, 0, 1);
+
+strcpy(300, "DIGITAL"); strcpy(301, "ANALOG BBD"); strcpy(302, "STUDIO TAPE"); strcpy(303, "CHEAP TAPE");
+strcpy(304, "SPACE ECHO"); strcpy(305, "DARK BBD"); strcpy(306, "LO-FI"); strcpy(307, "AMBIENT");
+strcpy(320, "LOW PASS"); strcpy(321, "HIGH PASS"); strcpy(322, "BAND PASS"); strcpy(323, "NOTCH");
+strcpy(324, "PEAK"); strcpy(325, "LOW SHELF"); strcpy(326, "HIGH SHELF");
+
+function ddef(i, q, name) ( divtab[i] = q; strcpy(340+i, name); );
+ddef(0, 0.0625, "1/64"); ddef(1, 1/12, "1/32T"); ddef(2, 0.125, "1/32"); ddef(3, 1/6, "1/16T");
+ddef(4, 0.1875, "1/32D"); ddef(5, 0.25, "1/16"); ddef(6, 1/3, "1/8T"); ddef(7, 0.375, "1/16D");
+ddef(8, 0.5, "1/8"); ddef(9, 2/3, "1/4T"); ddef(10, 0.75, "1/8D"); ddef(11, 1, "1/4");
+ddef(12, 4/3, "1/2T"); ddef(13, 1.5, "1/4D"); ddef(14, 2, "1/2"); ddef(15, 8/3, "1/1T");
+ddef(16, 3, "1/2D"); ddef(17, 4, "1 BAR"); ddef(18, 8, "2 BARS");
+strcpy(370, "1 BEAT"); strcpy(371, "1/2 BAR"); strcpy(372, "1 BAR"); strcpy(373, "2 BARS");
+restab[0] = 1; restab[1] = 0.5; restab[2] = 0.25; restab[3] = 0.125; restab[4] = 1/3; restab[5] = 1/6;
+strcpy(380, "1/4"); strcpy(381, "1/8"); strcpy(382, "1/16"); strcpy(383, "1/32"); strcpy(384, "1/8T"); strcpy(385, "1/16T");
+
+// ---------- default pattern ----------
+nh < 1 ? (
+  nh = 4;
+  htime[0] = 0.1875; hlev[0] = 0.9;
+  htime[1] = 0.375;  hlev[1] = 0.65;
+  htime[2] = 0.5;    hlev[2] = 0.8;
+  htime[3] = 0.75;   hlev[3] = 0.5;
+);
+
+// ---------- audio buffers ----------
+MAXD = floor(srate*12) + 16;
+PSN = floor(srate*0.25);
+PW = floor(srate*0.06);
+FLN = floor(srate*0.04) + 8;
+bufL = MEMBASE; bufR = bufL + MAXD;
+psL = bufR + MAXD; psR = psL + PSN;
+flL = psR + PSN; flR = flL + FLN;
+difL = flR + FLN; difR = difL + 8192;
+memtop = difR + 8192;
+memset(MEMBASE, 0, memtop - MEMBASE);
+memset(phzL, 0, 40);
+
+apn1 = max(8, floor(142*srate/44100)); apn2 = max(8, floor(107*srate/44100));
+apn3 = max(8, floor(379*srate/44100)); apn4 = max(8, floor(277*srate/44100));
+colL.base = difL; colR.base = difR;
+colL.p1 = colL.p2 = colL.p3 = colL.p4 = 0; colR.p1 = colR.p2 = colR.p3 = colR.p4 = 0;
+wp = 0; fwp = 0; pwp = 0; pphL = 0; pphR = 0; oscL = 0; oscR = 0;
+memset(tlpL, 0, 40); memset(hilL, 0, 80);
+// Hilbert transformer (Olli Niemitalo's 2 x 4 allpass network), coefficients squared
+hca[0] = 0.6923878^2; hca[1] = 0.9360654322959^2; hca[2] = 0.9882295226860^2; hca[3] = 0.9987488452737^2;
+hcb[0] = 0.4021921162426^2; hcb[1] = 0.8561710882420^2; hcb[2] = 0.9722909545651^2; hcb[3] = 0.9952884791278^2;
+hilL.base = hilL; hilR.base = hilR;
+gsc = 1 - exp(-1/(0.01*srate));
+eatt = 1 - exp(-1/(0.003*srate));
+erel = exp(-1/(0.25*srate));
+envdec = exp(-1/(0.12*srate));
+drc = 1 - exp(-1/(0.12*srate));
+started = 0; Ts = 0; TRs = 0; Ls = 0; maxmod = 16;
+memset(tsm, 0, 16);
+
+// ---------- DSP helpers ----------
+function sat(x) ( x > 3 ? 1 : x < -3 ? -1 : x*(27 + x*x)/(27 + 9*x*x) );
+function safe(x) local(a) ( a = abs(x); a <= 1 ? x : sign(x)*(1 + 0.5*sat((a - 1)*2)) );
+
+function hread(buf, d) local(p, i0, f, im, i1, i2, xm, x0, x1, x2, c1, c2, c3)
+(
+  d = max(4, min(MAXD - 8, d));
+  p = wp - d; p < 0 ? p += MAXD;
+  i0 = floor(p); f = p - i0;
+  im = i0 - 1; im < 0 ? im += MAXD;
+  i1 = i0 + 1; i1 >= MAXD ? i1 -= MAXD;
+  i2 = i0 + 2; i2 >= MAXD ? i2 -= MAXD;
+  xm = buf[im]; x0 = buf[i0]; x1 = buf[i1]; x2 = buf[i2];
+  c1 = 0.5*(x1 - xm);
+  c2 = xm - 2.5*x0 + 2*x1 - 0.5*x2;
+  c3 = 0.5*(x2 - xm) + 1.5*(x0 - x1);
+  ((c3*f + c2)*f + c1)*f + x0;
+);
+
+function lread(buf, n, wpos, d) local(p, i0, f, i1)
+(
+  p = wpos - d; p < 0 ? p += n;
+  i0 = floor(p); f = p - i0;
+  i1 = i0 + 1; i1 >= n ? i1 -= n;
+  buf[i0]*(1 - f) + buf[i1]*f;
+);
+
+function bq(x) instance(z1, z2) local(y)
+(
+  y = fb0*x + z1;
+  z1 = fb1*x - fa1*y + z2;
+  z2 = fb2*x - fa2*y;
+  y;
+);
+
+// delay "type" colouring, applied to everything written into the delay line
+function col(x) instance(l1, l2, h1, h2, hold, cnt, p1, p2, p3, p4, base) local(v1, v2, v3, y, o, v)
+(
+  v3 = x - h2; v1 = hA1*h1 + hA2*v3; v2 = h2 + hA2*h1 + hA3*v3;
+  h1 = 2*v1 - h1; h2 = 2*v2 - h2;
+  y = x - hK*v1 - v2;
+  v3 = y - l2; v1 = lA1*l1 + lA2*v3; v2 = l2 + lA2*l1 + lA3*v3;
+  l1 = 2*v1 - l1; l2 = 2*v2 - l2;
+  y = v2;
+  drvE > 0 ? y = sat(y*drvE)/drvE;
+  crB > 0 ? (
+    cnt += crR;
+    cnt >= 1 ? ( cnt -= 1; hold = floor(y*crQ + 0.5)/crQ; );
+    y = hold;
+  );
+  dfG > 0 ? (
+    o = base[p1]; v = y - dfG*o; base[p1] = v; y = o + dfG*v; p1 += 1; p1 >= apn1 ? p1 = 0;
+    o = base[2048+p2]; v = y - dfG*o; base[2048+p2] = v; y = o + dfG*v; p2 += 1; p2 >= apn2 ? p2 = 0;
+    o = base[4096+p3]; v = y - dfG*o; base[4096+p3] = v; y = o + dfG*v; p3 += 1; p3 >= apn3 ? p3 = 0;
+    o = base[6144+p4]; v = y - dfG*o; base[6144+p4] = v; y = o + dfG*v; p4 += 1; p4 >= apn4 ? p4 = 0;
+  );
+  y + nAmt*(rand(2) - 1);
+);
+
+// FX chain on fxL / fxR: Filter -> Phaser -> Flanger
+function dofx() local(y, o, z, j, t, a, f, d, ia, ib, wa, wb)
+(
+  fonS > 0.0001 ? (
+    y = bqL.bq(fxL); fxL += (y - fxL)*fonS;
+    y = bqR.bq(fxR); fxR += (y - fxR)*fonS;
+  );
+  ponS > 0.0001 ? (
+    php += phInc; php >= TWO_PI ? php -= TWO_PI;
+    f = max(20, min(0.45*srate, phC*2^(phD*2.5*sin(php))));
+    t = tan($pi*f/srate); a = (t - 1)/(t + 1);
+    y = fxL; j = 0;
+    loop(phN, z = phzL[j]; o = a*y + z; phzL[j] = y - a*o; y = o; j += 1; );
+    fxL += (y - fxL)*0.5*phM*ponS;
+    f = max(20, min(0.45*srate, phC*2^(phD*2.5*sin(php + phS))));
+    t = tan($pi*f/srate); a = (t - 1)/(t + 1);
+    y = fxR; j = 0;
+    loop(phN, z = phzR[j]; o = a*y + z; phzR[j] = y - a*o; y = o; j += 1; );
+    fxR += (y - fxR)*0.5*phM*ponS;
+  );
+  flonS > 0.0001 ? (
+    flp += fInc; flp >= TWO_PI ? flp -= TWO_PI;
+    d = max(2, fdl*(1 - fdep*0.95*(0.5 + 0.5*sin(flp))));
+    y = lread(flL, FLN, fwp, d); flL[fwp] = safe(fxL + ffb*y);
+    fxL += (y - fxL)*0.5*fmx*flonS;
+    d = max(2, fdl*(1 - fdep*0.95*(0.5 + 0.5*sin(flp + fSp))));
+    y = lread(flR, FLN, fwp, d); flR[fwp] = safe(fxR + ffb*y);
+    fxR += (y - fxR)*0.5*fmx*flonS;
+    fwp += 1; fwp >= FLN ? fwp = 0;
+  );
+);
+
+// Hilbert transform: sets hre (real) and him (imaginary, 90 deg) for input x
+function hil(x) instance(base, dly) local(j, xa, xb, y, s)
+(
+  xa = x; xb = x; j = 0;
+  loop(4,
+    s = base + j*4;
+    y = hca[j]*(xa + s[3]) - s[1]; s[1] = s[0]; s[0] = xa; s[3] = s[2]; s[2] = y; xa = y;
+    s = base + 16 + j*4;
+    y = hcb[j]*(xb + s[3]) - s[1]; s[1] = s[0]; s[0] = xb; s[3] = s[2]; s[2] = y; xb = y;
+    j += 1;
+  );
+  hre = dly; him = xb; dly = xa;
+);
+
+// delay-line pitch shifter read: two crossfaded taps
+function psread(buf, ph) local(ph2)
+(
+  ph2 = ph + 0.5; ph2 >= 1 ? ph2 -= 1;
+  lread(buf, PSN, pwp, 4 + ph*PW)*sin($pi*ph) + lread(buf, PSN, pwp, 4 + ph2*PW)*sin($pi*ph2);
+);
+
+// SHIFTER: sits in the feedback path, processes shL / shR
+function doshift() local(lfL, lfR, r, y, f)
+(
+  shph += shInc; shph >= TWO_PI ? shph -= TWO_PI;
+  lfL = sin(shph); lfR = sin(shph + shSt);
+  shMode == 0 ? (
+    psL[pwp] = shL; psR[pwp] = shR;
+    r = 2^((shSemi + shDep*12*lfL)/12); pphL += (1 - r)/PW;
+    pphL >= 1 ? pphL -= 1; pphL < 0 ? pphL += 1;
+    r = 2^((shSemi + shDep*12*lfR)/12); pphR += (1 - r)/PW;
+    pphR >= 1 ? pphR -= 1; pphR < 0 ? pphR += 1;
+    y = psread(psL, pphL); shL += (y - shL)*shMix*shonS;
+    y = psread(psR, pphR); shR += (y - shR)*shMix*shonS;
+    pwp += 1; pwp >= PSN ? pwp = 0;
+  ) : (
+    f = shFreq + shDep*300*lfL; oscL += TWO_PI*f/srate;
+    oscL >= TWO_PI ? oscL -= TWO_PI; oscL < 0 ? oscL += TWO_PI;
+    hilL.hil(shL); y = hre*cos(oscL) + him*sin(oscL); shL += (y - shL)*shMix*shonS;
+    f = shFreq + shDep*300*lfR; oscR += TWO_PI*f/srate;
+    oscR >= TWO_PI ? oscR -= TWO_PI; oscR < 0 ? oscR += TWO_PI;
+    hilR.hil(shR); y = hre*cos(oscR) + him*sin(oscR); shR += (y - shR)*shMix*shonS;
+  );
+);
+
+// ---------- parameter helpers ----------
+function dnm(s, n) local(u) ( n = max(0, min(1, n)); u = 2*n - 1; plog[s] == 2 ? pmax[s]*u*abs(u) : plog[s] ? pmin[s]*(pmax[s]/pmin[s])^n : pmin[s] + (pmax[s] - pmin[s])*n );
+function dnmg(s, n) local(u) ( n = max(0, min(1, n)); u = 2*n - 1; plog[s] == 2 ? pmax[s]*u*abs(u) : plog[s] ? pmin[s]*(pmax[s]/pmin[s])^n : pmin[s] + (pmax[s] - pmin[s])*n );
+function nrm(s, v) ( plog[s] == 2 ? 0.5 + 0.5*sign(v)*sqrt(abs(v)/pmax[s]) : plog[s] ? log(v/pmin[s])/log(pmax[s]/pmin[s]) : (v - pmin[s])/(pmax[s] - pmin[s]) );
+
+function update_eff() local(s, mv)
+(
+  mv = slider17*0.01;
+  s = 1;
+  loop(NS,
+    eff[s] = m_on[s] ? dnm(s, m_lo[s] + (m_hi[s] - m_lo[s])*mv) : slider(s);
+    s += 1;
+  );
+);
+
+function calc_times() local(bpm, qs, u, ii, lim)
+(
+  bpm = tempo > 0 ? tempo : 120;
+  qs = 60/bpm*srate;
+  barq = (ts_num > 0 && ts_denom > 0) ? ts_num*4/ts_denom : 4;
+  u = slider5|0;
+  ii = max(0, min(18, slider9|0));
+  dquart = ii == 17 ? barq : ii == 18 ? 2*barq : divtab[ii];
+  ii = max(0, min(3, slider11|0));
+  lenQ = ii == 0 ? 1 : ii == 1 ? barq*0.5 : ii == 2 ? barq : 2*barq;
+  resQ = restab[max(0, min(5, slider12|0))];
+  lim = MAXD - 64 - maxmod;
+  T = u == 0 ? dquart*qs : eff[10]*0.001*srate;
+  T = max(16, min(lim, T));
+  TR = (slider1|0) == 1 ? max(16, min(lim, T*(1 + eff[3]*0.01))) : T;
+  Lp = u == 0 ? lenQ*qs : eff[13]*0.001*srate;
+  Lp = max(64, min(lim, Lp));
+);
+
+function calc_filter() local(ft, fc, fq, w0, cw, sw, al, A, sa, b0, b1, b2, a0, a1, a2)
+(
+  ft = slider21|0;
+  fc = max(20, min(eff[22], 0.45*srate)); fq = max(0.1, eff[23]);
+  w0 = TWO_PI*fc/srate; cw = cos(w0); sw = sin(w0); al = sw/(2*fq); A = 10^(eff[24]/40);
+  ft == 0 ? ( b0 = (1 - cw)*0.5; b1 = 1 - cw; b2 = b0; a0 = 1 + al; a1 = -2*cw; a2 = 1 - al; ) :
+  ft == 1 ? ( b0 = (1 + cw)*0.5; b1 = -(1 + cw); b2 = b0; a0 = 1 + al; a1 = -2*cw; a2 = 1 - al; ) :
+  ft == 2 ? ( b0 = al; b1 = 0; b2 = -al; a0 = 1 + al; a1 = -2*cw; a2 = 1 - al; ) :
+  ft == 3 ? ( b0 = 1; b1 = -2*cw; b2 = 1; a0 = 1 + al; a1 = -2*cw; a2 = 1 - al; ) :
+  ft == 4 ? ( b0 = 1 + al*A; b1 = -2*cw; b2 = 1 - al*A; a0 = 1 + al/A; a1 = -2*cw; a2 = 1 - al/A; ) :
+  ft == 5 ? (
+    sa = 2*sqrt(A)*al;
+    b0 = A*((A + 1) - (A - 1)*cw + sa); b1 = 2*A*((A - 1) - (A + 1)*cw); b2 = A*((A + 1) - (A - 1)*cw - sa);
+    a0 = (A + 1) + (A - 1)*cw + sa; a1 = -2*((A - 1) + (A + 1)*cw); a2 = (A + 1) + (A - 1)*cw - sa;
+  ) : (
+    sa = 2*sqrt(A)*al;
+    b0 = A*((A + 1) + (A - 1)*cw + sa); b1 = -2*A*((A - 1) + (A + 1)*cw); b2 = A*((A + 1) + (A - 1)*cw - sa);
+    a0 = (A + 1) - (A - 1)*cw + sa; a1 = 2*((A - 1) - (A + 1)*cw); a2 = (A + 1) - (A - 1)*cw - sa;
+  );
+  fb0 = b0/a0; fb1 = b1/a0; fb2 = b2/a0; fa1 = a1/a0; fa2 = a2/a0;
+);
+
+function touch(s)
+(
+  s < 32 ? slider_automate(2^(s - 1)) :
+  s == 32 ? slider_automate(slider32) : s == 33 ? slider_automate(slider33) :
+  s == 34 ? slider_automate(slider34) : s == 35 ? slider_automate(slider35) :
+  s == 36 ? slider_automate(slider36) : s == 37 ? slider_automate(slider37) :
+  s == 38 ? slider_automate(slider38) : s == 39 ? slider_automate(slider39) :
+  s == 40 ? slider_automate(slider40) : s == 41 ? slider_automate(slider41) :
+  s == 42 ? slider_automate(slider42) : s == 43 ? slider_automate(slider43) :
+  s == 44 ? slider_automate(slider44) : s == 45 ? slider_automate(slider45) :
+  s == 46 ? slider_automate(slider46);
+);
+function setv(s, v) ( slider(s) = v; touch(s); );
+function setn(s, n) local(v) ( v = dnmg(s, n); s == 29 ? v = 2*floor(v*0.5 + 0.5); setv(s, v); );
+
+function macro_assign(s) local(n)
+(
+  n = max(0, min(1, nrm(s, slider(s))));
+  m_lo[s] = n; m_hi[s] = n < 0.9 ? 1 : 0; m_on[s] = 1;
+  sliderchange(-1);
+);
+function macro_remove(s) local(v) ( v = eff[s]; m_on[s] = 0; setv(s, v); sliderchange(-1); );
+
+// ---------- pattern helpers (GUI) ----------
+function snapf(f) local(st)
+(
+  f = max(0.005, min(1, f));
+  (slider5|0) == 0 && !(mouse_cap & 4) ? (
+    st = resQ/lenQ;
+    f = max(1, floor(f/st + 0.5))*st;
+    f > 1.0001 ? f = floor(1/st)*st;
+  );
+  f;
+);
+function add_handle(f, lv)
+(
+  nh < 16 ? (
+    htime[nh] = snapf(f); hlev[nh] = max(0.05, min(1, lv)); hpan[nh] = 0; hton[nh] = 0;
+    ttg[nh] = htime[nh]*Lp; tsm[nh] = ttg[nh]; tenv[nh] = 0; tlpL[nh] = tlpR[nh] = 0;
+    hsel = nh; nh += 1; sliderchange(-1);
+  );
+);
+function del_handle(ix) local(jx)
+(
+  nh > 1 ? (
+    jx = ix;
+    loop(nh - 1 - ix,
+      htime[jx] = htime[jx+1]; hlev[jx] = hlev[jx+1]; tsm[jx] = tsm[jx+1]; ttg[jx] = ttg[jx+1]; tenv[jx] = tenv[jx+1];
+      hpan[jx] = hpan[jx+1]; hton[jx] = hton[jx+1]; tlpL[jx] = tlpL[jx+1]; tlpR[jx] = tlpR[jx+1]; tcfa[jx] = tcfa[jx+1];
+      jx += 1;
+    );
+    nh -= 1; hsel >= ix ? hsel = max(0, hsel - 1); sliderchange(-1);
+  );
+);
+function reset_pattern()
+(
+  htime[0] = 0.1875; hlev[0] = 0.9; htime[1] = 0.375; hlev[1] = 0.65;
+  htime[2] = 0.5; hlev[2] = 0.8; htime[3] = 0.75; hlev[3] = 0.5;
+  tsm[0] = htime[0]*Lp; tsm[1] = htime[1]*Lp; tsm[2] = htime[2]*Lp; tsm[3] = htime[3]*Lp;
+  memset(hpan, 0, 16); memset(hton, 0, 16);
+  nh = 4; hsel = 0; sliderchange(-1);
+);
+function randomize() local(n, ix, st, steps)
+(
+  n = 3 + floor(rand(1)*5);
+  st = (slider5|0) == 0 ? resQ/lenQ : 1/16;
+  steps = max(1, floor(1/st + 0.5));
+  ix = 0;
+  loop(n,
+    htime[ix] = min(1, (1 + floor(rand(1)*steps))*st);
+    hlev[ix] = 0.35 + rand(1)*0.65;
+    hpan[ix] = floor((rand(2) - 1)*7)/10; hton[ix] = floor((rand(2) - 1)*5)/10;
+    tsm[ix] = htime[ix]*Lp; tenv[ix] = 0;
+    ix += 1;
+  );
+  nh = n; hsel = 0; sliderchange(-1);
+);
+
+// ---------- GUI helpers ----------
+function sx(v) ( ox + v*k );
+function sy(v) ( oy + v*k );
+function sd(v) ( v*k );
+function inside(x, y, w, h) ( mx >= x && mx < x + w && my >= y && my < y + h );
+function rr(x, y, w, h, r) local(X0, Y0, W0, H0, R0)
+(
+  X0 = sx(x); Y0 = sy(y); W0 = sd(w); H0 = sd(h);
+  R0 = floor(min(sd(r), min(W0, H0)*0.5));
+  R0 < 1 ? gfx_rect(X0, Y0, W0, H0) : (
+    gfx_rect(X0 + R0, Y0, W0 - 2*R0, H0);
+    gfx_rect(X0, Y0 + R0, R0, H0 - 2*R0);
+    gfx_rect(X0 + W0 - R0, Y0 + R0, R0, H0 - 2*R0);
+    gfx_circle(X0 + R0, Y0 + R0, R0, 1, 1);
+    gfx_circle(X0 + W0 - R0 - 1, Y0 + R0, R0, 1, 1);
+    gfx_circle(X0 + R0, Y0 + H0 - R0 - 1, R0, 1, 1);
+    gfx_circle(X0 + W0 - R0 - 1, Y0 + H0 - R0 - 1, R0, 1, 1);
+  );
+);
+function txt(x, y, w, h, str, fl) ( gfx_x = sx(x); gfx_y = sy(y); gfx_drawstr(str, fl, sx(x + w), sy(y + h)); );
+function panel(x, y, w, h, title)
+(
+  gfx_set(0.105, 0.11, 0.122, 1); rr(x, y, w, h, 10);
+  gfx_setfont(2); gfx_set(0.52, 0.54, 0.6, 1); txt(x + 14, y + 10, w - 28, 14, title, 0);
+);
+function dim(x, y, w, h) ( gfx_set(0.105, 0.11, 0.122, 0.62); gfx_rect(sx(x), sy(y), sd(w), sd(h)); );
+function pill(x, y, w, h, label, on) local(hov)
+(
+  hov = inside(x, y, w, h);
+  on ? gfx_set(0.22, 0.5, 1, 1) : hov ? gfx_set(0.21, 0.22, 0.25, 1) : gfx_set(0.16, 0.17, 0.19, 1);
+  rr(x, y, w, h, h*0.5);
+  gfx_setfont(5);
+  on ? gfx_set(1, 1, 1, 1) : gfx_set(0.72, 0.74, 0.78, 1);
+  txt(x, y, w, h, label, 5);
+  hov && click && act == 0;
+);
+function onpill(s, x, y) local(on)
+(
+  on = slider(s) >= 0.5;
+  pill(x, y, 46, 20, on ? "ON" : "OFF", on) ? setv(s, on ? 0 : 1);
+);
+function fmtv(s, v) local(u)
+(
+  u = punit[s];
+  u == 0 ? sprintf(#vs, "%.0f%%", v) :
+  u == 1 ? ( v < 10 ? sprintf(#vs, "%.2f ms", v) : v < 100 ? sprintf(#vs, "%.1f ms", v) : sprintf(#vs, "%.0f ms", v) ) :
+  u == 2 ? ( v <= -59.9 ? strcpy(#vs, "-inf") : sprintf(#vs, "%+.1f dB", v) ) :
+  u == 3 ? ( v >= 1000 ? sprintf(#vs, "%.2f kHz", v/1000) : v >= 100 ? sprintf(#vs, "%.0f Hz", v) : sprintf(#vs, "%.2f Hz", v) ) :
+  u == 4 ? sprintf(#vs, "%.2f", v) :
+  u == 5 ? sprintf(#vs, "%.0f°", v) :
+  u == 6 ? sprintf(#vs, "%d", v) :
+  u == 8 ? sprintf(#vs, "%+.2f st", v) :
+  u == 9 ? ( abs(v) < 100 ? sprintf(#vs, "%+.1f Hz", v) : sprintf(#vs, "%+.0f Hz", v) ) :
+  sprintf(#vs, "%+.0f%%", v);
+);
+// slim slider: label + value on top, track below, mouse-wheel nudge, right-click macro menu
+function sl(s, x, y, w) local(v, n, hov, mo, ty, r, lo, hi)
+(
+  v = eff[s]; n = max(0, min(1, nrm(s, v))); mo = m_on[s];
+  hov = inside(x - 4, y, w + 8, 28);
+  hov && click && act == 0 ? (
+    dbl ? ( mo ? 0 : setv(s, pdef[s]); ) : ( mo ? 0 : ( act = s; dragn = n; ); );
+  );
+  act == s && lb ? (
+    dragn = max(0, min(1, dragn + dmx/w*(shift ? 0.12 : 1)));
+    setn(s, dragn); n = dragn; v = dnmg(s, n);
+  );
+  hov && wheel != 0 && act == 0 && !mo ? (
+    setn(s, n + wheel*(shift ? 0.002 : 0.02));
+    n = max(0, min(1, n + wheel*(shift ? 0.002 : 0.02))); v = dnmg(s, n);
+  );
+  hov && rclick && act == 0 && pmac[s] ? (
+    gfx_x = mouse_x; gfx_y = mouse_y;
+    r = gfx_showmenu(mo ? "Remove from Macro|Reset to default" : "Assign to Macro|Reset to default");
+    r == 1 ? ( mo ? macro_remove(s) : macro_assign(s); );
+    r == 2 ? ( mo ? macro_remove(s); setv(s, pdef[s]); );
+  );
+  gfx_setfont(6); gfx_set(0.58, 0.6, 0.65, 1); txt(x, y, w, 14, 200 + s, 0);
+  fmtv(s, v); gfx_setfont(4); mo ? gfx_set(0.78, 0.66, 1, 1) : gfx_set(0.92, 0.93, 0.95, 1);
+  txt(x, y, w, 14, #vs, 2);
+  ty = y + 19;
+  gfx_set(0.2, 0.21, 0.24, 1); rr(x, ty, w, 4, 2);
+  mo ? (
+    lo = m_lo[s]; hi = m_hi[s];
+    gfx_set(0.62, 0.42, 1, 0.35); rr(x + min(lo, hi)*w, ty - 2, max(4, abs(hi - lo)*w), 8, 4);
+    gfx_set(0.62, 0.42, 1, 1);
+  ) : gfx_set(0.24, 0.52, 1, 1);
+  rr(x, ty, max(4, n*w), 4, 2);
+  (act == s || hov) ? gfx_set(1, 1, 1, 1) : gfx_set(0.85, 0.87, 0.9, 1);
+  gfx_circle(sx(x + n*w), sy(ty + 2), sd(5.5), 1, 1);
+);
+function iln(x, y, w, h, ax, ay, bx, by) ( gfx_line(sx(x + ax*w), sy(y + ay*h), sx(x + bx*w), sy(y + by*h), 1); );
+function ficon(t, x, y, w, h)
+(
+  t == 0 ? ( iln(x,y,w,h,0.12,0.35,0.55,0.35); iln(x,y,w,h,0.55,0.35,0.66,0.22); iln(x,y,w,h,0.66,0.22,0.88,0.85); ) :
+  t == 1 ? ( iln(x,y,w,h,0.12,0.85,0.34,0.22); iln(x,y,w,h,0.34,0.22,0.45,0.35); iln(x,y,w,h,0.45,0.35,0.88,0.35); ) :
+  t == 2 ? ( iln(x,y,w,h,0.12,0.85,0.5,0.2); iln(x,y,w,h,0.5,0.2,0.88,0.85); ) :
+  t == 3 ? ( iln(x,y,w,h,0.12,0.3,0.42,0.3); iln(x,y,w,h,0.42,0.3,0.5,0.85); iln(x,y,w,h,0.5,0.85,0.58,0.3); iln(x,y,w,h,0.58,0.3,0.88,0.3); ) :
+  t == 4 ? ( iln(x,y,w,h,0.12,0.62,0.38,0.62); iln(x,y,w,h,0.38,0.62,0.5,0.15); iln(x,y,w,h,0.5,0.15,0.62,0.62); iln(x,y,w,h,0.62,0.62,0.88,0.62); ) :
+  t == 5 ? ( iln(x,y,w,h,0.12,0.25,0.36,0.25); iln(x,y,w,h,0.36,0.25,0.6,0.68); iln(x,y,w,h,0.6,0.68,0.88,0.68); ) :
+  ( iln(x,y,w,h,0.12,0.68,0.4,0.68); iln(x,y,w,h,0.4,0.68,0.64,0.25); iln(x,y,w,h,0.64,0.25,0.88,0.25); );
+);
+// slim slider for per-repeat values stored in arrays (unit: 0 level, 1 pan, 2 tone)
+function asl(id, label, arr, ix, x, y, w, unit) local(v, n, hov, mn, mxv, dflt)
+(
+  mn = unit == 0 ? 0 : -1; mxv = 1; dflt = unit == 0 ? 1 : 0;
+  v = arr[ix]; n = (v - mn)/(mxv - mn);
+  hov = inside(x - 4, y, w + 8, 28);
+  hov && click && act == 0 ? ( dbl ? ( arr[ix] = dflt; hdirty = 1; ) : ( act = 500 + id; dragn = n; ); );
+  act == 500 + id && lb ? (
+    dragn = max(0, min(1, dragn + dmx/w*(shift ? 0.12 : 1)));
+    arr[ix] = mn + (mxv - mn)*dragn; hdirty = 1;
+  );
+  hov && wheel != 0 && act == 0 ? ( arr[ix] = max(mn, min(mxv, v + wheel*(mxv - mn)*(shift ? 0.002 : 0.02))); hdirty = 1; );
+  v = arr[ix]; n = (v - mn)/(mxv - mn);
+  unit == 0 ? sprintf(#vs, "%.0f%%", v*100) :
+  unit == 1 ? ( abs(v) < 0.005 ? strcpy(#vs, "CENTER") : sprintf(#vs, v < 0 ? "L %.0f" : "R %.0f", abs(v)*100) ) :
+  ( abs(v) < 0.005 ? strcpy(#vs, "NEUTRAL") : sprintf(#vs, v < 0 ? "DARKER %.0f%%" : "BRIGHTER %.0f%%", abs(v)*100) );
+  gfx_setfont(6); gfx_set(0.58, 0.6, 0.65, 1); txt(x, y, w, 14, label, 0);
+  gfx_setfont(4); gfx_set(0.92, 0.93, 0.95, 1); txt(x, y, w, 14, #vs, 2);
+  gfx_set(0.2, 0.21, 0.24, 1); rr(x, y + 19, w, 4, 2);
+  gfx_set(0.24, 0.52, 1, 1);
+  mn < 0 ? rr(x + min(n, 0.5)*w, y + 19, max(4, abs(n - 0.5)*w), 4, 2) : rr(x, y + 19, max(4, n*w), 4, 2);
+  (act == 500 + id || hov) ? gfx_set(1, 1, 1, 1) : gfx_set(0.85, 0.87, 0.9, 1);
+  gfx_circle(sx(x + n*w), sy(y + 21), sd(5.5), 1, 1);
+);
+
+function stem(xx, lv, cr, cg, cb) local(yy)
+(
+  yy = gy + 8 + (1 - lv)*(gh - 8);
+  gfx_set(cr, cg, cb, 0.85);
+  gfx_line(sx(xx), sy(yy), sx(xx), sy(gy + gh), 1);
+  gfx_set(cr, cg, cb, 1); gfx_circle(sx(xx), sy(yy), sd(5), 1, 1);
+);
+
+@slider
+// handled in @block / @gfx
+
+@block
+blk += 1;
+update_eff();
+typ = slider6|0; tb = typt + typ*16;
+chr = eff[7]*0.01;
+lpHz = typ == 0 ? 18000 : tb[0]*2^(1 - chr);
+lpHz = max(200, min(lpHz, min(20000, 0.45*srate)));
+gg = tan($pi*lpHz/srate); lK = 1/tb[2]; lA1 = 1/(1 + gg*(gg + lK)); lA2 = gg*lA1; lA3 = gg*lA2;
+gg = tan($pi*tb[1]/srate); hK = 1.4142136; hA1 = 1/(1 + gg*(gg + hK)); hA2 = gg*hA1; hA3 = gg*hA2;
+drvE = tb[3] > 0 ? 0.35*(1 + (tb[3] - 1)*chr) : 0;
+wowD = tb[4]*0.001*srate*chr; wowInc = TWO_PI*tb[5]/srate;
+flD = tb[6]*0.001*srate*chr; flInc = TWO_PI*tb[7]/srate;
+nAmt = tb[8]*chr; sph = tb[9];
+crB = tb[10] > 0 ? max(4, min(16, floor(tb[10] - 3*(chr - 1)))) : 0;
+crQ = 2^(crB - 1);
+crR = tb[11] > 0 ? min(1, tb[11]/(0.5 + 0.5*chr)/srate) : 1;
+dfG = tb[12] > 0 ? min(0.75, 0.45 + 0.15*chr) : 0;
+maxmod = 1.6*wowD + flD + 16;
+tcoef = typ == 0 ? 1 - exp(-1/(0.04*srate)) : 1 - exp(-1/(0.18*srate));
+
+calc_times();
+pb = slider1|0; md = slider4|0; fxa = slider14|0;
+width = eff[2]*0.01;
+fbT = eff[8]*0.01;
+dryT = eff[15] <= -59.9 ? 0 : 10^(eff[15]/20);
+wetT = eff[16] <= -59.9 ? 0 : 10^(eff[16]/20);
+frzT = slider18 >= 0.5;
+duckA = eff[19]*0.01;
+
+nh = max(1, min(16, nh|0));
+bi = 0;
+loop(nh,
+  ttg[bi] = max(16, min(Lp, htime[bi]*Lp));
+  tsm[bi] <= 0 ? tsm[bi] = ttg[bi];
+  br = 0; bj = 0;
+  loop(nh, (htime[bj] < htime[bi] || (htime[bj] == htime[bi] && bj < bi)) ? br += 1; bj += 1; );
+  tpan[bi] = (br % 2) == 0 ? -1 : 1;
+  // per-repeat tone: negative = darker (lowpass), positive = brighter (highpass)
+  btn = max(-1, min(1, hton[bi]));
+  bfc = btn <= 0 ? min(0.45*srate, 20000*2^(7*btn)) : 30*2^(6.5*btn);
+  tcfa[bi] = 1 - exp(-TWO_PI*bfc/srate);
+  bi += 1;
+);
+
+calc_filter();
+fonT = slider20 >= 0.5;
+ponT = slider25 >= 0.5; phC = eff[26]; phInc = TWO_PI*eff[27]/srate; phD = eff[28]*0.01;
+phN = max(2, min(12, 2*floor(eff[29]*0.5 + 0.5))); phS = eff[30]*$pi/180; phM = eff[31]*0.01;
+flonT = slider32 >= 0.5; fdl = eff[33]*0.001*srate; fdep = eff[34]*0.01; fInc = TWO_PI*eff[35]/srate;
+fSp = eff[36]*$pi/180; ffb = eff[37]*0.01; fmx = eff[38]*0.01;
+shonT = slider39 >= 0.5; shMode = slider40|0; shSemi = eff[41]; shFreq = eff[42]; shDep = eff[43]*0.01;
+shInc = TWO_PI*eff[44]/srate; shSt = eff[45]*$pi/180; shMix = eff[46]*0.01;
+
+Ts <= 0 ? Ts = T; TRs <= 0 ? TRs = TR; Ls <= 0 ? Ls = Lp;
+!started ? ( dryS = dryT; wetS = wetT; fbS = fbT; frS = frzT; dgS = 1; started = 1; );
+(play_state & 1) && !(lastps & 1) ? memset(MEMBASE, 0, memtop - MEMBASE);
+lastps = play_state;
+clipc = max(0, clipc - samplesblock);
+
+@sample
+inL = spl0; inR = spl1; mono = 0.5*(inL + inR);
+dryS += (dryT - dryS)*gsc; wetS += (wetT - wetS)*gsc; fbS += (fbT - fbS)*gsc; frS += (frzT - frS)*gsc;
+fonS += (fonT - fonS)*gsc; ponS += (ponT - ponS)*gsc; flonS += (flonT - flonS)*gsc; shonS += (shonT - shonS)*gsc;
+fbE = fbS*(1 - frS) + frS; inG = 1 - frS;
+
+// ducking envelope
+ea = abs(mono); env = ea > env ? env + (ea - env)*eatt : env*erel;
+dgS += ((1 - duckA*min(1, env*4)) - dgS)*gsc;
+
+// wow / flutter / drift
+wph += wowInc; wph >= TWO_PI ? wph -= TWO_PI;
+fph += flInc; fph >= TWO_PI ? fph -= TWO_PI;
+dcnt -= 1; dcnt <= 0 ? ( dtar = (rand(2) - 1)*wowD*0.6; dcnt = srate*0.3; );
+drift += (dtar - drift)*drc;
+modsc = 1 - frS;
+mL = (wowD*sin(wph) + flD*sin(fph) + drift)*modsc;
+mR = (wowD*sin(wph + sph) + flD*sin(fph + sph*1.7) + drift)*modsc;
+
+md == 0 ? (
+  // conventional delay
+  Ts += (T - Ts)*tcoef; TRs += (TR - TRs)*tcoef;
+  rL = hread(bufL, Ts + mL); rR = hread(bufR, TRs + mR);
+  wL = rL; wR = rR;
+) : (
+  // sequencer: loop length = grid length, every handle is a read tap
+  Ls += (Lp - Ls)*tcoef;
+  rL = hread(bufL, Ls + mL); rR = hread(bufR, Ls + mR);
+  wL = 0; wR = 0; i = 0;
+  loop(nh,
+    tsm[i] += (ttg[i] - tsm[i])*tcoef;
+    a = hread(bufL, tsm[i] + mL); b = hread(bufR, tsm[i] + mR);
+    // tone
+    c = tcfa[i]; tlpL[i] += c*(a - tlpL[i]); tlpR[i] += c*(b - tlpR[i]);
+    hton[i] <= 0 ? ( a = tlpL[i]; b = tlpR[i]; ) : ( a -= tlpL[i]; b -= tlpR[i]; );
+    // level + pan
+    g = hlev[i]; p = tpan[i]; q = hpan[i];
+    pb == 1 ? (
+      a = (a + b)*0.5*g; q = max(-1, min(1, p + q));
+      oL = a*min(1, 1 - q); oR = a*min(1, 1 + q);
+    ) : (
+      (pb == 2 && p > 0) ? ( oL = b*g; oR = a*g; ) : ( oL = a*g; oR = b*g; );
+      oL *= min(1, 1 - q); oR *= min(1, 1 + q);
+    );
+    te = abs(oL) + abs(oR); tenv[i] = max(te, tenv[i]*envdec);
+    wL += oL; wR += oR;
+    i += 1;
+  );
+);
+
+// SHIFTER: always in the feedback path, so every repeat is shifted again
+shonS > 0.0001 ? ( shL = rL; shR = rR; doshift(); rL = shL; rR = shR; );
+
+// what goes back into the delay lines
+pb == 2 ? (
+  xL = mono*inG + rR*fbE; xR = rL*fbE;
+) : (
+  xL = inL*inG + rL*fbE; xR = inR*inG + rR*fbE;
+);
+
+// stereo width of the echoes (Dual / Ping-Pong)
+pb > 0 ? ( mm = (wL + wR)*0.5; ss = (wL - wR)*0.5*width; wL = mm + ss; wR = mm - ss; );
+
+fxa == 2 ? ( fxL = xL; fxR = xR; dofx(); xL = fxL; xR = fxR; );
+cL = colL.col(xL); cR = colR.col(xR);
+xL = safe(cL + (xL - cL)*frS); xR = safe(cR + (xR - cR)*frS);
+bufL[wp] = xL; bufR[wp] = xR;
+wp += 1; wp >= MAXD ? wp = 0;
+
+wg = wetS*dgS; wL *= wg; wR *= wg;
+fxa == 0 ? (
+  fxL = inL*dryS + wL; fxR = inR*dryS + wR; dofx(); spl0 = fxL; spl1 = fxR;
+) : fxa == 1 ? (
+  fxL = wL; fxR = wR; dofx(); spl0 = inL*dryS + fxL; spl1 = inR*dryS + fxR;
+) : (
+  spl0 = inL*dryS + wL; spl1 = inR*dryS + wR;
+);
+max(abs(spl0), abs(spl1)) > 1 ? clipc = srate;
+
+@serialize
+sver = 2;
+file_var(0, sver);
+file_var(0, nh);
+si = 0; loop(16, file_var(0, htime[si]); file_var(0, hlev[si]); si += 1; );
+si = 1; loop(sver >= 2 ? 46 : 42, file_var(0, m_on[si]); file_var(0, m_lo[si]); file_var(0, m_hi[si]); si += 1; );
+sver >= 2 ? ( si = 0; loop(16, file_var(0, hpan[si]); file_var(0, hton[si]); si += 1; ); );
+nh = max(1, min(16, nh|0));
+
+@gfx 1180 720
+// when audio is idle, compute display values here
+blk != lastblk ? ( lastblk = blk; ) : ( update_eff(); calc_times(); calc_filter(); );
+
+k = max(0.4, min(gfx_w/1180, gfx_h/720));
+ox = max(0, floor((gfx_w - 1180*k)*0.5)); oy = max(0, floor((gfx_h - 720*k)*0.5));
+gfx_setfont(1, "Segoe UI", 26*k, 'b');
+gfx_setfont(2, "Segoe UI", 11*k, 'b');
+gfx_setfont(3, "Segoe UI", 12*k);
+gfx_setfont(4, "Segoe UI", 12*k, 'b');
+gfx_setfont(5, "Segoe UI", 11*k, 'b');
+gfx_setfont(6, "Segoe UI", 10.5*k);
+
+mx = (mouse_x - ox)/k; my = (mouse_y - oy)/k;
+lb = mouse_cap & 1; rbt = mouse_cap & 2; shift = mouse_cap & 8;
+click = lb && !(lcap & 1); rclick = rbt && !(lcap & 2);
+dbl = 0;
+click ? (
+  tnow = time_precise();
+  dbl = (tnow - lct < 0.35 && abs(mx - lcx) < 5 && abs(my - lcy) < 5);
+  lct = dbl ? 0 : tnow; lcx = mx; lcy = my;
+);
+dmx = mx - pmx; pmx = mx;
+wheel = mouse_wheel/120; mouse_wheel = 0;
+
+gpb = slider1|0; gmd = slider4|0; gu = slider5|0; gtyp = slider6|0; gfxa = slider14|0;
+
+gfx_set(0.055, 0.058, 0.066, 1); gfx_rect(0, 0, gfx_w, gfx_h);
+
+// ---------------- header ----------------
+gfx_setfont(1); gfx_x = sx(22); gfx_y = sy(12);
+gfx_set(1, 1, 1, 1); gfx_drawstr("ECHO"); gfx_set(0.24, 0.55, 1, 1); gfx_drawstr("GRID");
+gfx_setfont(2); gfx_set(0.45, 0.47, 0.52, 1); gfx_x += sd(14); gfx_y = sy(24); gfx_drawstr("SEQUENCER DELAY");
+
+slider18 >= 0.5 ? ( strcpy(#st, "FROZEN"); scr = 1; scg = 0.62; scb = 0.15; ) :
+clipc > 0 ? ( strcpy(#st, "CLIP"); scr = 1; scg = 0.3; scb = 0.3; ) : (
+  scr = 0.25; scg = 0.85; scb = 0.45;
+  gmd == 1 ? (
+    gu == 0 ? sprintf(#st, "SEQUENCER  ·  %d TAPS  ·  %s", nh, 370 + (slider11|0))
+            : sprintf(#st, "SEQUENCER  ·  %d TAPS  ·  %.0f ms", nh, eff[13]);
+  ) : (
+    gu == 0 ? sprintf(#st, "DELAY  ·  %s  ·  %.0f BPM", 340 + (slider9|0), tempo)
+            : sprintf(#st, "DELAY  ·  %.0f ms", eff[10]);
+  );
+);
+gfx_set(scr, scg, scb, 0.14); rr(904, 14, 260, 26, 13);
+gfx_set(scr, scg, scb, 1); gfx_circle(sx(920), sy(27), sd(4), 1, 1);
+gfx_setfont(5); txt(930, 14, 226, 26, #st, 4);
+
+// ---------------- row A ----------------
+panel(16, 58, 330, 118, "PLAYBACK MODE");
+pill(30, 88, 98, 26, "NORMAL", gpb == 0) ? setv(1, 0);
+pill(132, 88, 98, 26, "DUAL ECHO", gpb == 1) ? setv(1, 1);
+pill(234, 88, 98, 26, "PING-PONG", gpb == 2) ? setv(1, 2);
+sl(2, 30, 128, 142); gpb == 0 ? dim(24, 126, 154, 30);
+sl(3, 190, 128, 142); (gpb != 1 || gmd == 1) ? dim(184, 126, 154, 30);
+
+panel(356, 58, 270, 118, "MODE");
+pill(370, 88, 119, 26, "NORMAL", gmd == 0) ? setv(4, 0);
+pill(493, 88, 119, 26, "SEQUENCER", gmd == 1) ? setv(4, 1);
+gfx_setfont(2); gfx_set(0.42, 0.44, 0.5, 1); txt(370, 120, 200, 12, "TIME UNIT", 0);
+pill(370, 136, 119, 26, "BEAT DIV.", gu == 0) ? setv(5, 0);
+pill(493, 136, 119, 26, "MS (FREE)", gu == 1) ? setv(5, 1);
+
+panel(636, 58, 300, 118, "FX AFFECT");
+pill(650, 88, 88, 26, "EVERYTHING", gfxa == 0) ? setv(14, 0);
+pill(742, 88, 92, 26, "ONLY ECHOES", gfxa == 1) ? setv(14, 1);
+pill(838, 88, 84, 26, "IN LOOP", gfxa == 2) ? setv(14, 2);
+gfx_setfont(6); gfx_set(0.55, 0.57, 0.62, 1);
+gfxa == 0 ? ( txt(650, 126, 272, 14, "Filter, phaser & flanger process", 0); txt(650, 142, 272, 14, "the dry signal and the echoes together.", 0); ) :
+gfxa == 1 ? ( txt(650, 126, 272, 14, "FX process only the echoes —", 0); txt(650, 142, 272, 14, "the dry signal stays clean.", 0); ) :
+( txt(650, 126, 272, 14, "FX sit inside the feedback loop:", 0); txt(650, 142, 272, 14, "every repeat gets processed again.", 0); );
+
+panel(946, 58, 218, 118, "OUTPUT");
+sl(15, 960, 82, 190);
+sl(16, 960, 112, 190);
+sl(19, 960, 142, 190);
+
+// ---------------- row B: type ----------------
+panel(16, 186, 330, 252, "TYPE");
+gi = 0;
+loop(8,
+  pill(30 + (gi % 2)*153, 214 + floor(gi/2)*29, 148, 24, 300 + gi, gtyp == gi) ? setv(6, gi);
+  gi += 1;
+);
+sl(8, 30, 336, 302);
+sl(7, 30, 368, 302);
+pill(30, 404, 302, 24, slider18 >= 0.5 ? "FROZEN  (CLICK TO RELEASE)" : "FREEZE", slider18 >= 0.5) ? setv(18, slider18 >= 0.5 ? 0 : 1);
+
+// ---------------- row B: grid ----------------
+panel(356, 186, 808, 252, gmd == 1 ? "GRID  ·  SEQUENCER" : "GRID  ·  CONVENTIONAL DELAY");
+gfx_setfont(2); gfx_set(0.42, 0.44, 0.5, 1);
+gmd == 0 ? (
+  gu == 0 ? (
+    txt(370, 214, 40, 24, "TIME", 4);
+    pill(410, 214, 26, 24, "<", 0) ? setv(9, max(0, (slider9|0) - 1));
+    pill(440, 214, 92, 24, 340 + (slider9|0), 1) ? (
+      #mnu = ""; gj = 0;
+      loop(19, gj > 0 ? strcat(#mnu, "|"); gj == (slider9|0) ? strcat(#mnu, "!"); strcat(#mnu, 340 + gj); gj += 1; );
+      gfx_x = mouse_x; gfx_y = mouse_y; gr = gfx_showmenu(#mnu); gr > 0 ? setv(9, gr - 1);
+    );
+    pill(536, 214, 26, 24, ">", 0) ? setv(9, min(18, (slider9|0) + 1));
+    inside(410, 214, 152, 24) && wheel != 0 ? setv(9, max(0, min(18, (slider9|0) + sign(wheel))));
+    gfx_setfont(6); gfx_set(0.55, 0.57, 0.62, 1);
+    sprintf(#lb, "= %.0f ms", T/srate*1000); txt(572, 214, 100, 24, #lb, 4);
+  ) : (
+    sl(10, 370, 212, 300);
+  );
+  gfx_setfont(6); gfx_set(0.55, 0.57, 0.62, 1);
+  txt(700, 214, 450, 24, "Switch MODE to SEQUENCER to place every repeat yourself", 6);
+) : (
+  gu == 0 ? (
+    txt(370, 214, 48, 24, "LENGTH", 4);
+    gi = 0; loop(4, pill(420 + gi*62, 214, 58, 24, 370 + gi, (slider11|0) == gi) ? setv(11, gi); gi += 1; );
+    gfx_setfont(2); gfx_set(0.42, 0.44, 0.5, 1); txt(676, 214, 36, 24, "SNAP", 4);
+    gi = 0; loop(6, pill(712 + gi*46, 214, 42, 24, 380 + gi, (slider12|0) == gi) ? setv(12, gi); gi += 1; );
+  ) : (
+    sl(13, 370, 212, 300);
+    gfx_setfont(6); gfx_set(0.55, 0.57, 0.62, 1); txt(690, 214, 290, 24, "Free placement (no snap) in ms mode", 4);
+  );
+  pill(1000, 214, 74, 24, "RANDOM", 0) ? randomize();
+  pill(1078, 214, 72, 24, "RESET", 0) ? reset_pattern();
+);
+
+gx = 370; gy = 250; gw = 780; gh = gmd == 1 ? 112 : 150;
+hsel = max(0, min(nh - 1, hsel|0));
+gfx_set(0.07, 0.074, 0.083, 1); rr(gx - 6, gy - 6, gw + 12, gh + 12, 6);
+
+gmd == 1 ? (
+  // ----- grid lines -----
+  gu == 0 ? (
+    gn = max(1, floor(lenQ/resQ + 0.5));
+    gi = 0;
+    loop(gn + 1,
+      gq = gi*resQ; gxx = gx + gq/lenQ*gw;
+      gbar = abs(gq/barq - floor(gq/barq + 0.5)) < 0.001;
+      gbt = abs(gq - floor(gq + 0.5)) < 0.001;
+      gbar ? gfx_set(0.34, 0.36, 0.41, 1) : gbt ? gfx_set(0.21, 0.22, 0.26, 1) : gfx_set(0.13, 0.14, 0.16, 1);
+      gfx_line(sx(gxx), sy(gy), sx(gxx), sy(gy + gh), 0);
+      gbt && gi < gn ? (
+        sprintf(#lb, "%d.%d", floor(gq/barq + 0.0001) + 1, floor(gq - floor(gq/barq + 0.0001)*barq + 0.5) + 1);
+        gfx_setfont(6); gfx_set(0.42, 0.44, 0.5, 1); txt(gxx + 3, gy + gh + 6, 40, 12, #lb, 0);
+      );
+      gi += 1;
+    );
+  ) : (
+    gi = 0;
+    loop(17,
+      gxx = gx + gi/16*gw;
+      (gi % 4) == 0 ? gfx_set(0.3, 0.32, 0.37, 1) : gfx_set(0.13, 0.14, 0.16, 1);
+      gfx_line(sx(gxx), sy(gy), sx(gxx), sy(gy + gh), 0);
+      (gi % 4) == 0 && gi < 16 ? (
+        sprintf(#lb, "%.0f ms", eff[13]*gi/16);
+        gfx_setfont(6); gfx_set(0.42, 0.44, 0.5, 1); txt(gxx + 3, gy + gh + 6, 60, 12, #lb, 0);
+      );
+      gi += 1;
+    );
+  );
+  // loop marker
+  gfx_set(0.24, 0.55, 1, 0.5); gfx_line(sx(gx + gw), sy(gy), sx(gx + gw), sy(gy + gh), 0);
+  gfx_setfont(6); gfx_set(0.42, 0.44, 0.5, 1); txt(gx + gw - 120, gy + gh + 6, 120, 12, "LOOP END (FEEDBACK)", 2);
+
+  // ----- handles: hit test -----
+  ghov = -1;
+  gi = 0;
+  loop(nh,
+    gxx = gx + htime[gi]*gw; gyy = gy + 8 + (1 - hlev[gi])*(gh - 8);
+    ((abs(mx - gxx) < 8 && abs(my - gyy) < 8) || (abs(mx - gxx) < 4 && my > gyy && my < gy + gh)) ? ghov = gi;
+    gi += 1;
+  );
+  act >= 100 && act < 116 ? ghov = act - 100;
+  click && act == 0 && inside(gx - 6, gy - 6, gw + 12, gh + 12) ? (
+    ghov >= 0 ? (
+      act = 100 + ghov; hsel = ghov;
+      hgox = htime[ghov] - (mx - gx)/gw;
+      hgoy = hlev[ghov] - (1 - (my - gy - 8)/(gh - 8));
+    ) : dbl ? add_handle((mx - gx)/gw, 1 - (my - gy - 8)/(gh - 8));
+  );
+  rclick && act == 0 && ghov >= 0 ? ( del_handle(ghov); ghov = -1; );
+  act >= 100 && act < 116 && lb ? (
+    gi = act - 100;
+    htime[gi] = snapf((mx - gx)/gw + hgox);
+    hlev[gi] = max(0, min(1, 1 - (my - gy - 8)/(gh - 8) + hgoy));
+  );
+  ghov >= 0 && wheel != 0 && act == 0 ? ( hlev[ghov] = max(0, min(1, hlev[ghov] + wheel*0.05)); hdirty = 1; );
+
+  // ----- handles: draw -----
+  gi = 0;
+  loop(nh,
+    gxx = gx + htime[gi]*gw; gyy = gy + 8 + (1 - hlev[gi])*(gh - 8);
+    gpb > 0 && tpan[gi] > 0 ? ( gcr = 0.2; gcg = 0.82; gcb = 0.72; ) : ( gcr = 0.24; gcg = 0.55; gcb = 1; );
+    gfx_set(gcr, gcg, gcb, 0.9);
+    gfx_line(sx(gxx), sy(gyy), sx(gxx), sy(gy + gh), 1);
+    gfx_line(sx(gxx) + 1, sy(gyy), sx(gxx) + 1, sy(gy + gh), 1);
+    glow = min(1, tenv[gi]*3);
+    glow > 0.02 ? ( gfx_set(gcr, gcg, gcb, 0.28*glow); gfx_circle(sx(gxx), sy(gyy), sd(7 + 9*glow), 1, 1); );
+    gi == hsel ? ( gfx_set(1, 1, 1, 0.9); gfx_circle(sx(gxx), sy(gyy), sd(9), 0, 1); );
+    gi == ghov ? gfx_set(1, 1, 1, 1) : gfx_set(gcr, gcg, gcb, 1);
+    gfx_circle(sx(gxx), sy(gyy), sd(6), 1, 1);
+    // pan indicator under the dot
+    abs(hpan[gi]) > 0.01 ? ( gfx_set(1, 1, 1, 0.7); gfx_rect(sx(gxx + min(0, hpan[gi]*10)), sy(gyy + 9), max(1, sd(abs(hpan[gi])*10)), max(1, sd(2))); );
+    gi == ghov ? (
+      sprintf(#lb, "%.0f%%  ·  %.0f ms", hlev[gi]*100, htime[gi]*Lp/srate*1000);
+      gfx_setfont(6); gfx_set(1, 1, 1, 0.9);
+      txt(min(gx + gw - 110, gxx + 10), max(gy, gyy - 18), 110, 12, #lb, 0);
+    );
+    gi += 1;
+  );
+  gpb > 0 ? (
+    gfx_setfont(6);
+    gfx_set(0.24, 0.55, 1, 1); txt(gx + 6, gy + 2, 60, 12, "L ECHOES", 0);
+    gfx_set(0.2, 0.82, 0.72, 1); txt(gx + 70, gy + 2, 60, 12, "R ECHOES", 0);
+  );
+  // ----- selected repeat: level / pan / tone -----
+  gfx_setfont(2); gfx_set(0.24, 0.55, 1, 1);
+  sprintf(#lb, "REPEAT %d", hsel + 1); txt(370, 384, 80, 26, #lb, 4);
+  asl(1, "LEVEL", hlev, hsel, 456, 382, 210, 0);
+  asl(2, "PAN", hpan, hsel, 688, 382, 210, 1);
+  asl(3, "TONE", hton, hsel, 920, 382, 230, 2);
+  gfx_setfont(6); gfx_set(0.45, 0.47, 0.52, 1);
+  txt(370, 418, 780, 14, "Click a handle to select it  ·  Drag: time / level  ·  Double-click empty space: add  ·  Right-click: delete  ·  Wheel: level  ·  Ctrl-drag: ignore snap", 0);
+) : (
+  // ----- conventional mode: show the echo train (read only) -----
+  gwin = max(T, TR)*8.5;
+  gqs = 60/(tempo > 0 ? tempo : 120)*srate;
+  gu == 0 ? (
+    gstep = gwin/gqs > 48 ? barq*gqs : gqs;
+    gi = 0;
+    loop(min(200, floor(gwin/gstep) + 1),
+      gxx = gx + gi*gstep/gwin*gw;
+      gfx_set(0.16, 0.17, 0.19, 1); gfx_line(sx(gxx), sy(gy), sx(gxx), sy(gy + gh), 0);
+      gi += 1;
+    );
+  ) : (
+    gi = 0;
+    loop(17, gxx = gx + gi/16*gw; gfx_set(0.13, 0.14, 0.16, 1); gfx_line(sx(gxx), sy(gy), sx(gxx), sy(gy + gh), 0); gi += 1; );
+  );
+  gfv = min(1, eff[8]*0.01);
+  gn = 1;
+  loop(8,
+    glv = gfv^(gn - 1);
+    gxx = gx + gn*T/gwin*gw;
+    gpb == 2 ? (
+      (gn % 2) == 0 ? stem(gxx, glv, 0.2, 0.82, 0.72) : stem(gxx, glv, 0.24, 0.55, 1);
+    ) : (
+      stem(gxx, glv, 0.24, 0.55, 1);
+      gpb == 1 ? stem(gx + gn*TR/gwin*gw, glv, 0.2, 0.82, 0.72);
+    );
+    gn += 1;
+  );
+  gpb > 0 ? (
+    gfx_setfont(6);
+    gfx_set(0.24, 0.55, 1, 1); txt(gx + 6, gy + 2, 60, 12, "L ECHOES", 0);
+    gfx_set(0.2, 0.82, 0.72, 1); txt(gx + 70, gy + 2, 60, 12, "R ECHOES", 0);
+  );
+  gfx_setfont(6); gfx_set(0.45, 0.47, 0.52, 1);
+  sprintf(#lb, "Showing 8 repeats  ·  window %.2f s", gwin/srate);
+  txt(370, 418, 780, 14, #lb, 0);
+);
+
+// ---------------- row C: FX ----------------
+// FILTER
+panel(16, 448, 280, 258, "FILTER");
+onpill(20, 236, 454);
+gfx_set(0.07, 0.074, 0.083, 1); rr(30, 480, 252, 64, 6);
+gfx_set(0.18, 0.19, 0.22, 1); gfx_line(sx(34), sy(512), sx(278), sy(512), 0);
+slider20 >= 0.5 ? gfx_set(0.24, 0.55, 1, 1) : gfx_set(0.45, 0.47, 0.52, 1);
+gi = 0;
+loop(80,
+  gfq = 20*1000^(gi/79);
+  gw0 = TWO_PI*min(gfq, 0.49*srate)/srate; gc1 = cos(gw0); gc2 = cos(2*gw0);
+  gnum = fb0*fb0 + fb1*fb1 + fb2*fb2 + 2*(fb0*fb1 + fb1*fb2)*gc1 + 2*fb0*fb2*gc2;
+  gden = 1 + fa1*fa1 + fa2*fa2 + 2*(fa1 + fa1*fa2)*gc1 + 2*fa2*gc2;
+  gdb = max(-24, min(24, 10*log10(max(0.000000000001, gnum)/max(0.000000000001, gden))));
+  gxx = 34 + gi/79*244; gyy = 512 - gdb/24*27;
+  gi > 0 ? gfx_line(sx(gpx), sy(gpy), sx(gxx), sy(gyy), 1);
+  gpx = gxx; gpy = gyy;
+  gi += 1;
+);
+gfx_setfont(6); gfx_set(0.5, 0.52, 0.58, 1); txt(38, 483, 120, 12, 320 + (slider21|0), 0);
+gi = 0;
+loop(7,
+  gxx = 30 + gi*36;
+  ghv = inside(gxx, 552, 34, 22);
+  (slider21|0) == gi ? gfx_set(0.22, 0.5, 1, 1) : ghv ? gfx_set(0.21, 0.22, 0.25, 1) : gfx_set(0.16, 0.17, 0.19, 1);
+  rr(gxx, 552, 34, 22, 6);
+  (slider21|0) == gi ? gfx_set(1, 1, 1, 1) : gfx_set(0.72, 0.74, 0.78, 1);
+  ficon(gi, gxx + 3, 554, 28, 18);
+  ghv && click && act == 0 ? setv(21, gi);
+  gi += 1;
+);
+sl(22, 30, 586, 252);
+sl(23, 30, 618, 252);
+sl(24, 30, 650, 252); (slider21|0) < 4 ? dim(24, 648, 264, 30);
+slider20 < 0.5 ? dim(24, 478, 264, 204);
+
+// PHASER
+panel(306, 448, 210, 258, "PHASER");
+onpill(25, 456, 454);
+gi = 0; loop(6, sl(26 + gi, 320, 482 + gi*36, 182); gi += 1; );
+slider25 < 0.5 ? dim(314, 478, 196, 220);
+
+// FLANGER
+panel(526, 448, 210, 258, "FLANGER");
+onpill(32, 676, 454);
+gi = 0; loop(6, sl(33 + gi, 540, 482 + gi*36, 182); gi += 1; );
+slider32 < 0.5 ? dim(534, 478, 196, 220);
+
+// SHIFTER (always in the feedback loop)
+panel(746, 448, 180, 258, "SHIFTER");
+onpill(39, 866, 454);
+pill(760, 480, 74, 22, "PITCH", (slider40|0) == 0) ? setv(40, 0);
+pill(838, 480, 74, 22, "FREQ", (slider40|0) == 1) ? setv(40, 1);
+(slider40|0) == 0 ? sl(41, 760, 512, 152) : sl(42, 760, 512, 152);
+sl(43, 760, 548, 152);
+sl(44, 760, 584, 152);
+sl(45, 760, 620, 152);
+sl(46, 760, 656, 152);
+gfx_setfont(6); gfx_set(0.48, 0.5, 0.56, 1);
+txt(760, 686, 152, 14, "Every repeat shifts again", 0);
+slider39 < 0.5 ? dim(754, 506, 166, 196);
+
+// MACRO
+panel(936, 448, 228, 258, "MACRO");
+gmv = slider17*0.01;
+gfx_setfont(4); gfx_set(0.78, 0.66, 1, 1); sprintf(#vs, "%.0f%%", slider17); txt(950, 456, 200, 14, #vs, 2);
+gbx = 950; gby = 482; gbw = 200;
+ghv = inside(gbx - 6, gby - 8, gbw + 12, 28);
+click && ghv && act == 0 ? ( dbl ? setv(17, 0) : ( act = 17; dragn = gmv; ); );
+act == 17 && lb ? ( dragn = max(0, min(1, dragn + dmx/gbw*(shift ? 0.12 : 1))); setv(17, dragn*100); gmv = dragn; );
+ghv && wheel != 0 && act == 0 ? ( setv(17, max(0, min(100, slider17 + wheel*(shift ? 0.2 : 2)))); gmv = slider17*0.01; );
+gfx_set(0.2, 0.21, 0.24, 1); rr(gbx, gby, gbw, 12, 6);
+gfx_set(0.62, 0.42, 1, 1); rr(gbx, gby, max(12, gmv*gbw), 12, 6);
+gfx_set(1, 1, 1, 1); gfx_circle(sx(gbx + gmv*gbw), sy(gby + 6), sd(8), 1, 1);
+
+gfx_setfont(2); gfx_set(0.45, 0.47, 0.52, 1); txt(950, 508, 200, 12, "ASSIGNED", 0);
+gc = 0; gs = 1;
+loop(NS,
+  m_on[gs] ? (
+    gc < 8 ? (
+      gry = 526 + gc*21;
+      gfx_setfont(6); gfx_set(0.78, 0.8, 0.85, 1); txt(950, gry, 80, 14, 600 + gs, 4);
+      grx = 1032; grw = 106;
+      glo = m_lo[gs]; ghi = m_hi[gs];
+      inside(grx - 6, gry - 2, grw + 12, 18) && click && act == 0 ? (
+        abs(mx - (grx + glo*grw)) <= abs(mx - (grx + ghi*grw)) ? act = 300 + gs : act = 400 + gs;
+      );
+      act == 300 + gs && lb ? ( m_lo[gs] = max(0, min(1, (mx - grx)/grw)); mdirty = 1; );
+      act == 400 + gs && lb ? ( m_hi[gs] = max(0, min(1, (mx - grx)/grw)); mdirty = 1; );
+      inside(950, gry - 2, 190, 18) && rclick && act == 0 ? (
+        gfx_x = mouse_x; gfx_y = mouse_y;
+        gr = gfx_showmenu("Invert range|Full range|Remove from Macro");
+        gr == 1 ? ( gt = m_lo[gs]; m_lo[gs] = m_hi[gs]; m_hi[gs] = gt; sliderchange(-1); );
+        gr == 2 ? ( m_lo[gs] = 0; m_hi[gs] = 1; sliderchange(-1); );
+        gr == 3 ? macro_remove(gs);
+      );
+      glo = m_lo[gs]; ghi = m_hi[gs];
+      gfx_set(0.2, 0.21, 0.24, 1); rr(grx, gry + 5, grw, 4, 2);
+      gfx_set(0.62, 0.42, 1, 0.8); rr(grx + min(glo, ghi)*grw, gry + 5, max(4, abs(ghi - glo)*grw), 4, 2);
+      gfx_set(0.75, 0.76, 0.8, 1); gfx_circle(sx(grx + glo*grw), sy(gry + 7), sd(4.5), 1, 1);
+      gfx_set(0.62, 0.42, 1, 1); gfx_circle(sx(grx + ghi*grw), sy(gry + 7), sd(4.5), 1, 1);
+      gpos = glo + (ghi - glo)*gmv;
+      gfx_set(1, 1, 1, 1); gfx_rect(sx(grx + gpos*grw) - 1, sy(gry + 1), max(2, sd(2)), sd(12));
+      pill(1144, gry, 16, 16, "×", 0) ? macro_remove(gs);
+    );
+    gc += 1;
+  );
+  gs += 1;
+);
+gfx_setfont(6); gfx_set(0.48, 0.5, 0.56, 1);
+gc == 0 ? (
+  txt(950, 530, 200, 14, "Right-click any slider and", 0);
+  txt(950, 545, 200, 14, "choose 'Assign to Macro'.", 0);
+  txt(950, 568, 200, 14, "Then drag the grey (start) and", 0);
+  txt(950, 583, 200, 14, "purple (end) dots to set range.", 0);
+);
+gc > 8 ? ( sprintf(#lb, "+ %d more", gc - 8); txt(950, 694, 200, 12, #lb, 0); );
+
+// ---------------- end of frame ----------------
+!lb ? (
+  ((act >= 100 && act < 116) || mdirty || hdirty) ? sliderchange(-1);
+  mdirty = 0; hdirty = 0; act = 0;
+);
+lcap = mouse_cap;
