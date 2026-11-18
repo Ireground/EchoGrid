@@ -73,5 +73,7 @@ private:
     eg::Times tm {};
     double srate = 48000;
 
+    bool sizeReady = false;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EchoGridEditor)
 };

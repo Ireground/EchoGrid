@@ -38,15 +38,18 @@ namespace
 EchoGridEditor::EchoGridEditor (EchoGridProcessor& p)
     : AudioProcessorEditor (p), proc (p)
 {
+    // Read the saved size before setResizeLimits(): that call triggers resized() at the
+    // minimum size, which used to overwrite the saved scale.
+    const float s = juce::jlimit (0.5f, 2.0f, proc.uiScale.load());
     setResizable (true, true);
     setResizeLimits (W / 2, H / 2, W * 2, H * 2);
     if (auto* c = getConstrainer()) c->setFixedAspectRatio ((double) W / (double) H);
-    const float s = juce::jlimit (0.5f, 2.0f, proc.uiScale.load());
     setSize (juce::roundToInt (W * s), juce::roundToInt (H * s));
+    sizeReady = true;
     startTimerHz (30);
 }
 
-void EchoGridEditor::resized() { proc.uiScale = uiScale(); }
+void EchoGridEditor::resized() { if (sizeReady) proc.uiScale = uiScale(); }
 
 //==============================================================================
 // value helpers
